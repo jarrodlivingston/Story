@@ -15,6 +15,8 @@ import {
   FiPlus,
   FiLoader,
   FiTrash2,
+  FiMic,
+  FiFilm,
 } from "react-icons/fi";
 import { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -84,7 +86,42 @@ const MODELS = [
       },
       duration: { min: 4, max: 15, default: 5 },
     },
-  }
+  },
+  {
+    id: "seedance-2-5",
+    name: "Seedance 2.5",
+    type: "MODEL",
+    icon: FiVideo,
+    description: "ByteDance's flagship model with native 4K and up to 30s clips.",
+    api: "https://api.muapi.ai/api/v1/seedance-2.5-image-to-video",
+    params: {
+      aspect_ratio: {
+        options: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21"],
+        default: "16:9",
+      },
+      resolution: { options: ["480p", "720p", "1080p", "4k"], default: "720p" },
+      duration: { min: 4, max: 30, default: 5 },
+    },
+  },
+  {
+    id: "seedance-2-5-avatar",
+    name: "Seedance 2.5 Avatar + Voice",
+    type: "MODEL",
+    icon: FiCamera,
+    description:
+      "Experimental: generate from a reference video of your avatar plus a voice clip, using Seedance 2.5's Omni Reference workflow.",
+    api: "https://api.muapi.ai/api/v1/seedance-2.5-omni-reference",
+    acceptsVideo: true,
+    acceptsAudio: true,
+    params: {
+      aspect_ratio: {
+        options: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21"],
+        default: "9:16",
+      },
+      resolution: { options: ["480p", "720p", "1080p", "4k"], default: "720p" },
+      duration: { min: 4, max: 30, default: 5 },
+    },
+  },
 ];
 
 function CustomDropdown({ label, value, options, onChange, unit = "" }) {
@@ -198,9 +235,13 @@ export default function Home() {
   const [modelSettings, setModelSettings] = useState({});
   const [isGenerating, setIsGenerating] = useState(false);
   const [uploadedImages, setUploadedImages] = useState([]);
+  const [uploadedVideos, setUploadedVideos] = useState([]);
+  const [uploadedAudios, setUploadedAudios] = useState([]);
   const [prompt, setPrompt] = useState("");
   const [lastGeneration, setLastGeneration] = useState(null);
   const fileInputRef = useRef(null);
+  const videoInputRef = useRef(null);
+  const audioInputRef = useRef(null);
   const router = useRouter();
 
   // Polling for last generation status
@@ -264,6 +305,14 @@ export default function Home() {
       return duration * 50;
     }
 
+    if (selectedModel.id === "seedance-2-5" || selectedModel.id === "seedance-2-5-avatar") {
+      let rate = 68; // 720p, $0.34/sec at 200 credits/$
+      if (resolution === "480p") rate = 34;
+      else if (resolution === "1080p") rate = 170;
+      else if (resolution === "4k") rate = 340;
+      return duration * rate;
+    }
+
     return 10;
   };
 
@@ -314,15 +363,66 @@ export default function Home() {
     setUploadedImages(prev => prev.filter(img => img.id !== id));
   };
 
+  const uploadMediaFiles = async (files, setter) => {
+    const newItems = files.map(file => ({
+      id: Math.random().toString(36).substr(2, 9),
+      file,
+      preview: URL.createObjectURL(file),
+      status: 'uploading'
+    }));
+
+    setter(prev => [...prev, ...newItems]);
+
+    for (const item of newItems) {
+      try {
+        const formData = new FormData();
+        formData.append("file", item.file);
+
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) throw new Error("Upload failed");
+
+        const data = await response.json();
+
+        setter(prev => prev.map(p =>
+          p.id === item.id ? { ...p, status: 'ready', url: data.url } : p
+        ));
+      } catch (error) {
+        console.error("Upload error:", error);
+        setter(prev => prev.map(p =>
+          p.id === item.id ? { ...p, status: 'error' } : p
+        ));
+      }
+    }
+  };
+
+  const handleVideoUpload = (e) => {
+    const files = Array.from(e.target.files);
+    uploadMediaFiles(files, setUploadedVideos);
+  };
+
+  const handleAudioUpload = (e) => {
+    const files = Array.from(e.target.files);
+    uploadMediaFiles(files, setUploadedAudios);
+  };
+
+  const removeVideo = (id) => setUploadedVideos(prev => prev.filter(v => v.id !== id));
+  const removeAudio = (id) => setUploadedAudios(prev => prev.filter(a => a.id !== id));
+
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
-    if (uploadedImages.some(img => img.status === 'uploading')) {
-      alert("Please wait for images to finish uploading.");
+    if (uploadedImages.some(img => img.status === 'uploading')
+      || uploadedVideos.some(v => v.status === 'uploading')
+      || uploadedAudios.some(a => a.status === 'uploading')) {
+      alert("Please wait for uploads to finish.");
       return;
     }
 
     setIsGenerating(true);
-    
+
     try {
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -331,13 +431,15 @@ export default function Home() {
           modelId: selectedModel.id,
           prompt,
           settings: modelSettings,
-          images: uploadedImages.filter(img => img.status === 'ready').map(img => img.url)
+          images: uploadedImages.filter(img => img.status === 'ready').map(img => img.url),
+          videos: uploadedVideos.filter(v => v.status === 'ready').map(v => v.url),
+          audios: uploadedAudios.filter(a => a.status === 'ready').map(a => a.url)
         })
       });
 
       const data = await response.json();
       if (data.error) throw new Error(data.error);
-      
+
       setLastGeneration({
         id: data.creationId,
         status: 'processing',
@@ -491,14 +593,106 @@ export default function Home() {
               )}
             </AnimatePresence>
 
+            {/* Video Reference Preview List (avatar model only) */}
+            <AnimatePresence>
+              {selectedModel.acceptsVideo && uploadedVideos.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 10 }}
+                  className="flex items-center gap-3 p-4 border-b border-glass-border overflow-x-auto no-scrollbar"
+                >
+                  {uploadedVideos.map((vid, index) => (
+                    <motion.div
+                      key={vid.id}
+                      layout
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      className="relative group flex-shrink-0"
+                    >
+                      <video
+                        src={vid.preview}
+                        className={`w-8 h-8 rounded object-cover border border-glass-border shadow-sm transition-opacity ${vid.status === 'uploading' ? 'opacity-40' : 'opacity-100'}`}
+                        muted
+                      />
+                      {vid.status === 'uploading' && (
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <FiLoader className="text-primary animate-spin text-sm" />
+                        </div>
+                      )}
+                      <button
+                        onClick={() => removeVideo(vid.id)}
+                        className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded"
+                      >
+                        <FiTrash2 className="text-white text-xs" />
+                      </button>
+                    </motion.div>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Audio Reference Preview List (avatar model only) */}
+            <AnimatePresence>
+              {selectedModel.acceptsAudio && uploadedAudios.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 10 }}
+                  className="flex items-center gap-3 p-4 border-b border-glass-border overflow-x-auto no-scrollbar"
+                >
+                  {uploadedAudios.map((audio, index) => (
+                    <motion.div
+                      key={audio.id}
+                      layout
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      className={`relative group flex-shrink-0 w-8 h-8 rounded border border-glass-border shadow-sm flex items-center justify-center transition-opacity ${audio.status === 'uploading' ? 'opacity-40' : 'opacity-100'}`}
+                    >
+                      <FiMic className="text-muted text-sm" />
+                      {audio.status === 'uploading' && (
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <FiLoader className="text-primary animate-spin text-sm" />
+                        </div>
+                      )}
+                      <button
+                        onClick={() => removeAudio(audio.id)}
+                        className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded"
+                      >
+                        <FiTrash2 className="text-white text-xs" />
+                      </button>
+                    </motion.div>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div className="p-4 flex items-center gap-2 pb-0">
-              <button 
+              <button
                 onClick={() => fileInputRef.current?.click()}
                 className="p-1.5 rounded hover:bg-glass-hover text-muted hover:text-foreground transition-colors"
                 title="Upload Image"
               >
                 <FiImage size={20} className="text-sm" />
               </button>
+              {selectedModel.acceptsVideo && (
+                <button
+                  onClick={() => videoInputRef.current?.click()}
+                  className="p-1.5 rounded hover:bg-glass-hover text-muted hover:text-foreground transition-colors"
+                  title="Upload Avatar Video"
+                >
+                  <FiFilm size={20} className="text-sm" />
+                </button>
+              )}
+              {selectedModel.acceptsAudio && (
+                <button
+                  onClick={() => audioInputRef.current?.click()}
+                  className="p-1.5 rounded hover:bg-glass-hover text-muted hover:text-foreground transition-colors"
+                  title="Upload Voice Clip"
+                >
+                  <FiMic size={20} className="text-sm" />
+                </button>
+              )}
               <textarea
                 value={prompt}
                 onChange={(e) => {
@@ -512,12 +706,28 @@ export default function Home() {
               />
             </div>
 
-            <input 
+            <input
               type="file"
               ref={fileInputRef}
               onChange={handleImageUpload}
               multiple
               accept="image/*"
+              className="hidden"
+            />
+
+            <input
+              type="file"
+              ref={videoInputRef}
+              onChange={handleVideoUpload}
+              accept="video/*"
+              className="hidden"
+            />
+
+            <input
+              type="file"
+              ref={audioInputRef}
+              onChange={handleAudioUpload}
+              accept="audio/*"
               className="hidden"
             />
 

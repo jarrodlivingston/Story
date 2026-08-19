@@ -7,8 +7,13 @@ const MODEL_ENDPOINTS = {
   "grok-video": "https://api.muapi.ai/api/v1/grok-imagine-image-to-video",
   "veo-3-1": "https://api.muapi.ai/api/v1/veo3.1-image-to-video",
   "happy-horse": "https://api.muapi.ai/api/v1/happy-horse-1-image-to-video-720p",
-  "seedance-2": "https://api.muapi.ai/api/v1/seedance-2-image-to-video"
+  "seedance-2": "https://api.muapi.ai/api/v1/seedance-2-image-to-video",
+  "seedance-2-5": "https://api.muapi.ai/api/v1/seedance-2.5-image-to-video",
+  "seedance-2-5-avatar": "https://api.muapi.ai/api/v1/seedance-2.5-omni-reference"
 };
+
+// Seedance 2.5 encodes non-default resolution as a URL suffix rather than a body param.
+const SEEDANCE_2_5_RESOLUTION_SUFFIX = { "480p": "-480p", "1080p": "-1080p", "4k": "-4k" };
 
 export async function POST(req) {
   try {
@@ -19,7 +24,7 @@ export async function POST(req) {
     }
 
     const body = await req.json();
-    const { modelId, prompt, settings, images } = body;
+    const { modelId, prompt, settings, images, videos, audios } = body;
 
     const headerApiKey = req.headers.get("x-custom-api-key");
     const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
@@ -30,9 +35,14 @@ export async function POST(req) {
       return new NextResponse("API Key not configured", { status: 500 });
     }
 
-    const endpoint = MODEL_ENDPOINTS[modelId];
+    let endpoint = MODEL_ENDPOINTS[modelId];
     if (!endpoint) {
       return new NextResponse("Invalid model selected", { status: 400 });
+    }
+
+    if (modelId === "seedance-2-5" || modelId === "seedance-2-5-avatar") {
+      const suffix = SEEDANCE_2_5_RESOLUTION_SUFFIX[settings.resolution];
+      if (suffix) endpoint += suffix;
     }
 
     // Calculate required credits
@@ -54,6 +64,12 @@ export async function POST(req) {
       requiredCredits = duration * 36;
     } else if (modelId === "seedance-2") {
       requiredCredits = duration * 50;
+    } else if (modelId === "seedance-2-5" || modelId === "seedance-2-5-avatar") {
+      let rate = 68; // 720p, $0.34/sec at 200 credits/$
+      if (resolution === "480p") rate = 34;
+      else if (resolution === "1080p") rate = 170;
+      else if (resolution === "4k") rate = 340;
+      requiredCredits = duration * rate;
     }
 
     if (isUsingCustomKey) {
@@ -73,13 +89,20 @@ export async function POST(req) {
     }
 
     // Prepare payload based on MUAPI specs
+    const { resolution: _resolution, ...settingsWithoutResolution } = settings;
     const payload = {
       prompt,
       images_list: images,
       image_url: images && images.length > 0 ? images[0] : undefined, // Some models require image_url
       webhook_url: `${process.env.WEBHOOK_URL}/api/webhook/muapi`,
-      ...settings
+      // Resolution is encoded in the URL for Seedance 2.5; everyone else takes it as a body param.
+      ...(modelId === "seedance-2-5" || modelId === "seedance-2-5-avatar" ? settingsWithoutResolution : settings)
     };
+
+    if (modelId === "seedance-2-5-avatar") {
+      if (videos && videos.length > 0) payload.videos_list = videos;
+      if (audios && audios.length > 0) payload.audios_list = audios;
+    }
 
     // Call MUAPI
     const response = await fetch(endpoint, {
