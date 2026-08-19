@@ -437,8 +437,21 @@ export default function Home() {
         })
       });
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
+      if (response.status === 401) {
+        throw new Error("Please sign in to generate videos.");
+      }
+
+      const rawBody = await response.text();
+      let data;
+      try {
+        data = JSON.parse(rawBody);
+      } catch {
+        throw new Error(rawBody || `Request failed (${response.status})`);
+      }
+
+      if (!response.ok || data.error) {
+        throw new Error(data.error || `Request failed (${response.status})`);
+      }
 
       setLastGeneration({
         id: data.creationId,
